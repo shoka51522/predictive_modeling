@@ -8,7 +8,12 @@ output:
     css: style.css
 ---
 
-點我前往預告片
+<br>
+```{r}
+library(emo)
+```
+## [`r emo::ji("teacher")`](https://youtu.be/1vjeHhGYNsc) 
+想看預告片可以點我
 
 前言: 如何應用有限資料創造大數據的力量
 以小雜貨店為例，帶入情境介紹預測性模型的基本觀念，以及如何應用。並以雜貨店老闆的提問，來帶入我們要預測的目標為何。
