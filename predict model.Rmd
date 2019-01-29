@@ -1,0 +1,778 @@
+---
+title: "預測性模型"
+author: "修修，叡哲"
+output: 
+  html_document:
+    highlight: pygments
+    theme: flatly
+    css: style.css
+---
+
+點我前往預告片
+
+前言: 如何應用有限資料創造大數據的力量
+以小雜貨店為例，帶入情境介紹預測性模型的基本觀念，以及如何應用。並以雜貨店老闆的提問，來帶入我們要預測的目標為何。
+之後我們降利用此資料來預測顧客下一期行為
+Y: 預測顧客會不會來買以及會買多少錢
+購買金額   (amount)
+基本資料檢視、資料視覺化，可以幫助我們快速了解這筆資料。
+購買與否  (Buy)
+X: 如何重新彙整顧客資料以及產品銷售資訊
+
+Chapter 1: 資料彙整流程
+
++ 彙整之資料分為3部分:Z、X、A
++ Z: 最原始隻交易項目紀錄，以每筆交易序號排序
++ X: 將交易資料加上顧客基本資料，如ID、年齡、居住地區
++ A: 因為最後是要預測顧客下一期購買行為，因此將資料型態調整為以顧客資料排序
+<center>
+
+
+
+</center>
+
+<hr>
+
+### 1. 交易項目計錄：`Z`
+
+```{r echo=T, message=F, cache=F, warning=F}
+rm(list=ls(all=T))
+# Sys.setlocale("LC_ALL","C")
+library(dplyr)
+library(ggplot2)
+library(caTools)
+```
+
+##### 1.1 The `do.call-rbind-lapply` Combo
+```{r}
+Z = do.call(rbind, lapply(
+    dir('data/TaFengDataSet','.*csv$',full.names=T),
+    read.csv, header=F) 
+  ) %>% 
+  setNames(c("date","cust","age","area","cat","prod","qty","cost","price"))
+nrow(Z)
+```
+
+##### Data Convresion
+```{r}
+Z$date = as.Date(as.character(Z$date))
+summary(Z)
+```
+
++ 將date變成文字型態
++ 利用summary查看原始資料之敘述統計量
+
+##### Quantile of Variables
+```{r}
+sapply(Z[,7:9], quantile, prob=c(.99, .999, .9995))
+```
+
+##### Get rid of Outliers
+```{r}
+Z = subset(Z, qty<=24 & cost<=3800 & price<=4000) 
+nrow(Z)  
+```
+
++ 就算有一大筆資料，只要有一筆離群值，就可能造成估計上的偏差
++ 找出並過濾掉離群值
+
+##### Assign Transaction ID
+```{r}
+Z$tid = group_indices(Z, date, cust)
+```
+
+##### No. Customers, Categories, Product Items & Transactions
+```{r}
+sapply(Z[,c("cust","cat","prod","tid")], n_distinct)
+```
+
++ 總共有32256位不同的顧客、2007種不同產品...等
+
+##### Summary of Item Records
+```{r}
+summary(Z)
+```
+
++ 再看一次去掉離群值後的敘述統計
+
+<br><hr>
+### 2. 交易計錄：`X`
+
+##### 交易資料彙整
+```{r}
+X = group_by(Z, tid) %>% summarise(
+  date = first(date),  # 交易日期
+  cust = first(cust),  # 顧客 ID
+  age = first(age),    # 顧客 年齡級別
+  area = first(area),  # 顧客 居住區別
+  items = n(),                # 交易項目(總)數
+  pieces = sum(qty),          # 產品(總)件數
+  total = sum(price),         # 交易(總)金額
+  gross = sum(price - cost)   # 毛利
+  ) %>% data.frame  # 119422
+```
+
++ 將交易資料依據交易ID排序??
+
+##### 交易摘要
+```{r}
+summary(X)    
+```
+
++ X與Z之summary結果為何不同?
+
+##### Check Quantile & Remove Outliers
+```{r}
+sapply(X[,6:9], quantile, prob=c(.999, .9995, .9999))
+```
+
+```{r}
+X = subset(X, items<=62 & pieces<95 & total<16000) # 119328
+```
+
++ 去除離群值
+
+##### Weekly Transactions
+```{r fig.height=3, fig.width=7}
+par(cex=0.8)
+hist(X$date, "weeks", freq=T, border='lightgray', col='darkcyan', 
+     las=2, main="No. Transaction per Week")
+```
+
++ 由直方圖看每周交易筆數差異
++ 可看見聖誕節當周交易量特別低，同學可以想想其背後商業意涵唷
+
+<br><hr>
+
+
+
+### 3. 顧客資料：`A`
+
+##### 顧客資料彙整
+```{r}
+d0 = max(X$date)
+A = group_by(X, cust) %>% summarise(
+  r = 1 + as.integer(difftime(d0, max(date), units="days")), # recency
+  s = 1 + as.integer(difftime(d0, min(date), units="days")), # seniority
+  f = n(),            # frquency
+  m = mean(total),    # monetary
+  rev = sum(total),   # total revenue contribution
+  raw = sum(gross),   # total gross profit contribution
+  age = first(age),   # age group
+  area = first(area), # area code
+  ) %>% data.frame    # 33241
+```
+
++ 由顧客資料依照rfm分析製作新變數，rfm分析介紹請看: 
++ rfm分析: 從交易記錄到顧客產品矩陣
++ r: 距今最近一次購買
++ s: 顧客第一次購買
++ f: 顧客購買頻率
++ m: 平均交易金額
+
+##### 顧客摘要
+```{r}
+summary(A) 
+```
+
+```{r fig.height=8}
+par(mfrow=c(3,2), mar=c(3,3,4,2))
+for(x in c('r','s','f','m')) 
+  hist(A[,x],freq=T,main=x,xlab="",ylab="",cex.main=2)
+hist(pmin(A$f,10),0:10,freq=T,xlab="",ylab="",cex.main=2)
+hist(log(A$m,10),freq=T,xlab="",ylab="",cex.main=2)
+```
+
++ 藉由直方圖，將rfm等變數視覺化，看圖說故事
+
+##### Dupliate & Save
+```{r}
+A0 = A; X0 = X; Z0 = Z
+save(Z0, X0, A0, file="data/tf0.rdata")
+```
+<br><hr>
+
+
+
+### 4. Objective of the Contest 
+
+```{r}
+range(X$date)
+```
+
+**使用一月底(含2001-01-31)以前的資料，建立模型來預測每一位顧客：**
+
+a. **她在2月份(2001-02-01 ~ 2001-02-28)會不會來買？**
+b. **如果她來買的話，會買多少錢？**
+
+<br>
+
+Chapter 2: 資料準備流程
+
++ 本章節中，我們要將資料分成預測變數與目標變數
++ 由上圖可知，我們將2月作為分界點
++ 2月份之前之購買行為做為預測變數，將這些預測變數用來預測2月份之購買行為
+</center>
+
+<hr>
+
+### Preparing The Predictors (X)
+
+```{r}
+rm(list=ls(all=TRUE))
+load("data/tf0.rdata")
+```
+
+##### The Demarcation Date
+Remove data after the demarcation date
+```{r}
+feb01 = as.Date("2001-02-01")
+Z = subset(Z0, date < feb01)    # 618212
+```
+
++ 僅留下2月份以前資料作為預測變數
+
+##### Aggregate for the Transaction Records
+```{r}
+X = group_by(Z, tid) %>% summarise(
+  date = first(date),  # 交易日期
+  cust = first(cust),  # 顧客 ID
+  age = first(age),    # 顧客 年齡級別
+  area = first(area),  # 顧客 居住區別
+  items = n(),                # 交易項目(總)數
+  pieces = sum(qty),          # 產品(總)件數
+  total = sum(price),         # 交易(總)金額
+  gross = sum(price - cost)   # 毛利
+  ) %>% data.frame  # 88387
+```
+
++ tid: 同一天、同一位顧客的交易會有相同tid
++ X以日期排序
++ 前4項以first函數編排是本身就固定的變數，以first擷取出來而已
++ items: 此交易紀錄中總共購買幾種商品，兩個高麗菜一瓶牛奶記為2
++ pieces:此交易紀錄總共購買幾件商品，兩個高麗菜一瓶牛奶記為3
+
+```{r}
+summary(X)
+```
+
+##### Check Quantile and Remove Outlier 
+```{r}
+sapply(X[,6:9], quantile, prob=c(.999, .9995, .9999))
+```
+
+```{r}
+X = subset(X, items<=64 & pieces<=98 & total<=11260) # 88387 -> 88295
+```
+
+##### Aggregate for Customer Records
+
+A: 整理並在最後用來跑預測性模型之資料
+```{r}
+d0 = max(X$date)
+A = group_by(X, cust) %>% summarise(
+  r = 1 + as.integer(difftime(d0, max(date), units="days")), # recency
+  s = 1 + as.integer(difftime(d0, min(date), units="days")), # seniority
+  f = n(),            # frquency
+  m = mean(total),    # monetary
+  rev = sum(total),   # total revenue contribution
+  raw = sum(gross),   # total gross profit contribution
+  age = first(age),   # age group
+  area = first(area), # area code
+  ) %>% data.frame    # 28584
+```
+<br><br><hr>
+
+### Preparing the Target Variables (Y)
+
+##### Aggregate Feb's Transaction by Customer
+```{r}
+feb = filter(X0, date>= feb01) %>% group_by(cust) %>% 
+  summarise(amount = sum(total))  # 16899
+```
+
+##### The Target for Regression - `A$amount`
+Simply a Left Joint
+```{r}
+A = merge(A, feb, by="cust", all.x=T)
+```
+
++ 將顧客2月之購買行為，也就是我們要預測的Y合併進入A資料框
+
+##### The Target for Classification - `A$buy`
+```{r}
+A$buy = !is.na(A$amount)
+```
+
+##### Summary of the Dataset
+```{r}
+summary(A)
+```
+
+##### The Association of Categorial Predictors
+```{r fig.height=3, fig.width=7.2}
+tapply(A$buy, A$age, mean) %>% barplot
+abline(h = mean(A$buy), col='red')
+```
+
+```{r fig.height=3, fig.width=7.2}
+tapply(A$buy, A$area, mean) %>% barplot
+abline(h = mean(A$buy), col='red')
+```
+
+##### Contest Dataset
+```{r}
+X = subset(X, cust %in% A$cust & date < as.Date("2001-02-01"))
+Z = subset(Z, cust %in% A$cust & date < as.Date("2001-02-01"))
+set.seed(2018); spl = sample.split(A$buy, SplitRatio=0.7)
+c(nrow(A), sum(spl), sum(!spl))
+
+A2 = subset(A, buy) %>% mutate_at(c("m","rev","amount"), log10)
+set.seed(2018); spl2 = sample.split(A2$amount, SplitRatio=0.7)
+c(nrow(A2), sum(spl2), sum(!spl2))
+
+save(Z, X, A, spl, spl2, file="data/tf2.rdata")
+```
+
++ 將X與Z資料框結合進A資料框中
++ 並將A資料框以7:3之比例分為訓練與測試資料
++ set.seed為避免大家的訓練與測試資料都不同，只要seed的數字一樣，就會有一樣的切割方式
++ 將預測會不會來買以及買多少之資料框分開為A和A2，其中將A2中m,rev,amount等級距較大之欄位取log避免差異過大
+
+
+Chapter3: 迴歸模型
+
+<center>
+
+![Fig-1: The First Model](modeling.jpg)
+
+</center>
+
+<hr>
+
+### Loading & Preparing Data
+
+##### Loading Data
+```{r}
+rm(list=ls(all=TRUE))
+load("data/tf2.rdata")
+```
+
+##### Spliting for Classification 
+```{r}
+TR = subset(A, spl)
+TS = subset(A, !spl)
+```
+<br><hr>
+
++ 將顧客資料分成訓練資料及測試資料
++ 利用訓練資料來製作模型，並且預測測試資料看此模型準不準
+
+### Classification Model
+```{r}
+glm1 = glm(buy ~ ., TR[,c(2:9, 11)], family=binomial()) 
+summary(glm1)
+pred =  predict(glm1, TS, type="response")
+cm = table(actual = TS$buy, predict = pred > 0.5); cm
+acc.ts = cm %>% {sum(diag(.))/sum(.)}; acc.ts          # 0.69998
+colAUC(pred, TS$buy)                                   # 0.7556
+```
++ 檢視此模型，我們可以查看各個X對於Y的顯著程度
++ AIC 越小越好
++ 檢視acc , AUC
+
+
+<br><hr>
+
+
+### Regression Model
+```{r}
+A2 = subset(A, A$buy) %>% mutate_at(c("m","rev","amount"), log10)
+TR2 = subset(A2, spl2)
+TS2 = subset(A2, !spl2)
+```
+
+```{r}
+lm1 = lm(amount ~ ., TR2[,c(2:6,8:10)])
+summary(lm1)
+```
++ 檢視此預測模型
++ 斜率的+/-表示正/負相關，大小表示對應變數影響程度
++ R2表示此模型能夠解釋的變異程度
++ 星號代表顯著的自變數
+
+```{r}
+r2.tr = summary(lm1)$r.sq
+SST = sum((TS2$amount - mean(TR2$amount))^ 2)
+SSE = sum((predict(lm1, TS2) -  TS2$amount)^2)
+r2.ts = 1 - (SSE/SST)
+c(r2.tr, r2.ts)
+```
++ 即總變異(SST)=已解釋變異(SSR)+ 未解釋變異(SSE)
+
+<br><br><br><hr><br><br><br>
+
+Chapter4: 決策樹
+
++ 除了迴歸模型外，決策樹也是個用來預測的好工具
+
+<center>
+
+![Fig-1: Feature Engineering](featuring.jpg)
+
+![Fig-2: Feature Engr. & Data Spliting Process](feature_engr.jpg)
+
+
+</center>
+
+<br><hr>
+
+### Loading & Preparing Data
+```{r echo=T, message=F, cache=F, warning=F}
+Sys.setlocale("LC_ALL","C")
+library(Matrix)
+library(slam)
+library(rpart)
+library(rpart.plot)
+```
+
+```{r}
+rm(list=ls(all=TRUE))
+load("data/tf2.rdata")
+A2 = subset(A, buy)
+c(sum(spl), sum(spl2))
+```
+<br><hr>
+
+### Weekday Percentage: W1 ~ W7
+```{r}
+X = X %>% mutate(wday = format(date, "%w"))
+table(X$wday)
+```
+
+
+```{r}
+mx = xtabs(~ cust + wday, X)
+dim(mx)
+```
+
+```{r}
+mx[1:5,]
+```
+
+```{r}
+mx = mx / rowSums(mx)
+mx[1:5,]
+```
+
+```{r}
+A = data.frame(as.integer(rownames(mx)), as.matrix.data.frame(mx)) %>% 
+  setNames(c("cust","W1","W2","W3","W4","W5","W6","W7")) %>% 
+  right_join(A, by='cust')
+head(A)
+```
+<br><hr>
+
+### Classification (Buy) Model
+```{r}
+TR = subset(A, spl)
+TS = subset(A, !spl)
+```
+
+```{r}
+library(rpart)
+library(rpart.plot)
+rpart1 = rpart(buy ~ ., TR[,c(2:16,18)], method="class")
+pred =  predict(rpart1, TS)[,2]  # predict prob
+cm = table(actual = TS$buy, predict = pred > 0.5); cm
+acc.ts = cm %>% {sum(diag(.))/sum(.)}; acc.ts   # 0.70662          
+colAUC(pred, TS$buy)                            # 0.6984
+```
++ 利用CART – Classification & Regression Tree建立預測模型
++ 使用CART 預測 類別
++ 檢視測試資料的準確度
++ 檢視AUC
+
+```{r fig.height=3, fig.width=7.2}
+rpart.plot(rpart1,cex=0.6)
+```
+
+```{r}
+rpart2 = rpart(buy ~ ., TR[,c(2:16,18)], method="class",cp=0.001)
+pred =  predict(rpart2, TS)[,2]  # predict prob
+cm = table(actual = TS$buy, predict = pred > 0.5); cm
+acc.ts = cm %>% {sum(diag(.))/sum(.)}; acc.ts   # 0.70417          
+colAUC(pred, TS$buy)                            # 0.7169         
+```
+
+```{r}
+rpart.plot(rpart2,cex=0.6)
+```
+
+### Regression (Amount) Model
+```{r}
+A2 = subset(A, buy) %>% mutate_at(c("m","rev","amount"), log10)
+TR2 = subset(A2, spl2)
+TS2 = subset(A2, !spl2)
+```
++ 由於是預測數量，將資料取Log10可以避免單位不同所造成的數字差異
+```{r}
+rpart3 = rpart(amount ~ ., TR2[,c(2:17)], cp=0.002)
+SST = sum((TS2$amount - mean(TR2$amount))^ 2)
+SSE = sum((predict(rpart3, TS2) -  TS2$amount)^2)
+1 - (SSE/SST)
+```
+
++ 即總變異(SST)=已解釋變異(SSR)+ 未解釋變異(SSE)
+
+Chapter5: 交叉驗證與參數調校
+
++ 何謂交叉驗證(cross validation)?
++ 將交叉驗證之結果應用在我們的預測性模型上
+
+點我看影片
+
+### 交叉驗證與參數調校流程
+
+<center>
+
+![Fig-1: Supervised Learning Process](supervised.jpg)
+
+![Fig-2: CV, Model Sel. & Parameter Tuning](cv.jpg)
+
+</center>
+
+<br><hr>
+
+##### Libraries
+```{r echo=T, message=F, cache=F, warning=F}
+Sys.setlocale("LC_ALL","C")
+library(caret)
+library(doParallel)
+```
+
+##### Loading and Spliting
+```{r}
+rm(list=ls(all=TRUE))
+load("data/tf2.rdata")
+A$buy = factor(ifelse(A$buy, "yes", "no"))  # comply to the rule of caret
+TR = A[spl, c(2:9,11)]
+TS = A[!spl, c(2:9,11)]
+```
+
+##### Turn on Parallel Processing
+```{r}
+clust = makeCluster(detectCores())
+registerDoParallel(clust); getDoParWorkers()
+```
+
++ 開啟平行運算，將電腦的每一個CPU都叫出來工作，以免執行交叉驗證的等待時間過長
++ 可以看到自己的電腦有幾顆CPU
+
+### 決策樹之交叉驗證 
+
+##### CV Control for Classification
+```{r}
+ctrl = trainControl(
+  method="repeatedcv", number=10,    # 10-fold, Repeated CV
+  savePredictions = "final", classProbs=TRUE,
+  summaryFunction=twoClassSummary)
+```
+
++ 設定交叉驗證要將原本的資料切成幾塊(執行幾次)
+
+##### CV: `rpart()`, Classification Tree 
+```{r}
+ctrl$repeats = 2
+t0 = Sys.time(); set.seed(2)
+cv.rpart = train(
+  buy ~ ., data=TR, method="rpart", 
+  trControl=ctrl, metric="ROC",
+  tuneGrid = expand.grid(cp = seq(0.0002,0.001,0.0001) ) )
+Sys.time() - t0
+```
+
+```{r fig.height=3, fig.width=7}
+plot(cv.rpart)
+```
+
+```{r}
+cv.rpart$results 
+```
+
++ 如同影片所說，複雜度越高不一定越"準"，因此透過參數調校，找出最適合的複雜度和參數組合
+
+##### Classification Tree, Final Model
+```{r}
+rpart1 = rpart(buy ~ ., TR, method="class", cp=0.0005)
+predict(rpart1, TS, type="prob")[,2] %>% 
+  colAUC(TS$buy)
+```
+<br><hr>
+
+##### CV: `glm()`, General Linear Model(邏輯式回歸)
+```{r}
+ctrl$repeats = 2
+t0 = Sys.time(); set.seed(2)
+cv.glm = train(
+  buy ~ ., data=TR, method="glm", 
+  trControl=ctrl, metric="ROC")
+Sys.time() - t0
+```
+
+```{r}
+cv.glm$results
+```
+
+##### `glm()`, Final Model
+```{r}
+glm1 = b=glm(buy ~ ., TR, family=binomial)
+predict(glm1, TS, type="response") %>% colAUC(TS$buy)
+```
+
++ 執行完CV後，決策樹之AUC上升至0.7556038
+
+<br><hr>
+
+
+### 線性迴歸之交叉驗證
+
+##### Spliting Data
+```{r}
+A2 = subset(A, A$buy == "yes") %>% mutate_at(c("m","rev","amount"), log10)
+TR2 = A2[ spl2, c(2:10)]
+TS2 = A2[!spl2, c(2:10)]
+```
+
+##### CV Control for Regression
+```{r}
+ctrl2 = trainControl(
+  method="repeatedcv", number=10,    # 10-fold, Repeated CV
+  savePredictions = "final")
+```
+
++ 同樣將資料切為10等分
+
+##### CV: `rpart()` Regression Tree
+```{r fig.height=3, fig.width=7}
+ctrl$repeats = 2
+set.seed(2)
+cv.rpart2 = train(
+  amount ~ ., data=TR2, method="rpart", 
+  trControl=ctrl2, metric="Rsquared",
+  tuneGrid = expand.grid(cp = seq(0.0008,0.0024,0.0001) ) )
+plot(cv.rpart2)
+```
+
++ 透過參數調校找出最佳複雜度
+
+```{r}
+cv.rpart2$results
+```
+
+##### `rpart()`, Regression Tree Final Model
+```{r}
+rpart2 = rpart(amount ~ ., data=TR2, cp=0.0016)
+SST = sum((TS2$amount - mean(TR2$amount))^ 2)
+SSE = sum((predict(rpart2, TS2) -  TS2$amount)^2)
+(r2.ts.rpart2 = 1 - (SSE/SST))
+```
+
++ 
+
+##### CV: `lm()`, Linear Model
+```{r fig.height=3, fig.width=7}
+ctrl$repeats = 2
+set.seed(2)
+cv.lm2 = train(
+  amount ~ ., data=TR2, method="lm", 
+  trControl=ctrl2, metric="Rsquared",
+    tuneGrid = expand.grid( intercept = seq(0,5,0.5) ) 
+  )
+plot(cv.lm2)
+```
+
+```{r}
+cv.lm2$results
+```
+
+##### `lm()` Final Model
+```{r}
+lm2 = lm(amount ~ ., TR2)
+SST = sum((TS2$amount - mean(TR2$amount))^ 2)
+SSE = sum((predict(lm2, TS2) -  TS2$amount)^2)
+(r2.ts.lm2 = 1 - (SSE/SST))
+```
+
++ 線性迴歸做完交叉驗證後之R^2為0.2381007
+
+##### 要記得關閉平行運算功能喔!
+```{r}
+stopCluster(clust)
+```
+<br><br><hr><br><br><br><br>
+<style>
+
+.caption {
+  color: #777;
+  margin-top: 10px;
+}
+p code {
+  white-space: inherit;
+}
+pre {
+  word-break: normal;
+  word-wrap: normal;
+  line-height: 1;
+}
+pre code {
+  white-space: inherit;
+}
+p,li {
+  font-family: "Trebuchet MS", "微軟正黑體", "Microsoft JhengHei";
+}
+
+.r{
+  line-height: 1.2;
+}
+
+.qiz {
+  line-height: 1.75;
+  background: #f0f0f0;
+  border-left: 12px solid #ccffcc;
+  padding: 4px;
+  padding-left: 10px;
+  color: #009900;
+}
+
+title{
+  color: #cc0000;
+  font-family: "Trebuchet MS", "微軟正黑體", "Microsoft JhengHei";
+}
+
+body{
+  font-family: "Trebuchet MS", "微軟正黑體", "Microsoft JhengHei";
+}
+
+h1,h2,h3,h4,h5{
+  color: #0066ff;
+  font-family: "Trebuchet MS", "微軟正黑體", "Microsoft JhengHei";
+}
+
+
+h3{
+  color: #008800;
+  background: #e6ffe6;
+  line-height: 2;
+  font-weight: bold;
+}
+
+h5{
+  color: #006000;
+  background: #f8f8f8;
+  line-height: 1.5;
+  font-weight: bold;
+}
+
+</style>
+
